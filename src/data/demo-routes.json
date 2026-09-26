@@ -1,1 +1,38 @@
-[{"id":"1A01","headcode":"1A01","latitude":50.8324,"longitude":-0.1788,"updatedAt":"2026-09-26T08:04:00Z","operator":"Southern","origin":"Portsmouth Harbour","destination":"Brighton","route":[{"lat":50.787,"lng":-0.675},{"lat":50.819,"lng":-0.413},{"lat":50.8324,"lng":-0.1788},{"lat":50.828,"lng":-0.141}],"signals":[{"id":"WS101","name":"WS101","lat":50.807,"lng":-0.333,"aspect":null},{"id":"WS114","name":"WS114","lat":50.826,"lng":-0.202,"aspect":null},{"id":"WS120","name":"WS120","lat":50.831,"lng":-0.17,"aspect":null}]},{"id":"1B25","headcode":"1B25","latitude":51.296,"longitude":-0.076,"updatedAt":"2026-09-26T08:03:30Z","operator":"Southern","origin":"London Victoria","destination":"Brighton","route":[{"lat":51.496,"lng":-0.144},{"lat":51.296,"lng":-0.076},{"lat":50.95,"lng":-0.15},{"lat":50.828,"lng":-0.141}],"signals":[{"id":"VC220","name":"VC220","lat":51.39,"lng":-0.11,"aspect":null},{"id":"VC271","name":"VC271","lat":51.1,"lng":-0.13,"aspect":null}]},{"id":"1C70","headcode":"1C70","latitude":53.479,"longitude":-2.247,"updatedAt":"2026-09-26T08:03:45Z","operator":"Northern","origin":"Manchester Airport","destination":"Liverpool Lime Street","route":[{"lat":53.365,"lng":-2.272},{"lat":53.479,"lng":-2.247},{"lat":53.408,"lng":-2.978}],"signals":[{"id":"MN800","name":"MN800","lat":53.45,"lng":-2.27,"aspect":null},{"id":"LN315","name":"LN315","lat":53.42,"lng":-2.65,"aspect":null}]}]
+[
+  {
+    "id": "demo-southern-1",
+    "headcode": "1A23",
+    "latitude": 50.8324,
+    "longitude": -0.1788,
+    "updatedAt": "2026-09-26T09:00:00Z",
+    "operator": "Southern",
+    "origin": "Portsmouth Harbour",
+    "destination": "Brighton",
+    "route": [
+      { "lat": 50.819, "lng": -0.413 },
+      { "lat": 50.8324, "lng": -0.1788 },
+      { "lat": 50.828, "lng": -0.141 }
+    ],
+    "signals": [
+      { "id": "WS114", "name": "WS114", "lat": 50.826, "lng": -0.202, "aspect": null }
+    ]
+  },
+  {
+    "id": "demo-thameslink-2",
+    "headcode": "9T42",
+    "latitude": 50.8352,
+    "longitude": -0.151,
+    "updatedAt": "2026-09-26T09:00:00Z",
+    "operator": "Thameslink",
+    "origin": "Brighton",
+    "destination": "Bedford",
+    "route": [
+      { "lat": 50.828, "lng": -0.141 },
+      { "lat": 50.8352, "lng": -0.151 },
+      { "lat": 50.846, "lng": -0.124 }
+    ],
+    "signals": [
+      { "id": "BS201", "name": "BS201", "lat": 50.832, "lng": -0.146, "aspect": "green" }
+    ]
+  }
+]
