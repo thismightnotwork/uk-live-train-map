@@ -1,13 +1,25 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0f172a" />
-    <title>UK Live Train Map</title>
-  </head>
-  <body>
-    <div id="app"><main class="boot-screen"><h1>UK Live Train Map</h1><p>Loading application…</p></main></div>
-    <script type="module" src="/src/main.js"></script>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <title>UK Live Train Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div><h1>UK Live Train Map</h1><p id="status">Loading live trains…</p></div>
+      <div class="actions"><button id="refresh" type="button">Refresh</button><button id="locate" type="button">Locate me</button></div>
+    </header>
+    <main class="content">
+      <aside class="services"><h2>Services</h2><div id="service-list"></div></aside>
+      <div id="map" aria-label="Live train map"></div>
+    </main>
+  </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
+  <script src="./app.js"></script>
+</body>
 </html>
