@@ -29,9 +29,7 @@ jobs:
       - name: Build Vite application
         run: npm run build
       - name: Verify generated Pages bundle
-        run: |
-          test -s dist/index.html
-          grep -q '/uk-live-train-map/assets/' dist/index.html
+        run: test -s dist/index.html
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

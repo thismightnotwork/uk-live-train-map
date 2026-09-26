@@ -32,7 +32,6 @@ async function start() {
       const button = document.createElement('button');
       button.className = 'service-card';
       button.type = 'button';
-      button.dataset.id = train.id;
       button.innerHTML = `<strong>${escapeHtml(train.headcode)}</strong><span>${escapeHtml(train.origin || 'Unknown')} → ${escapeHtml(train.destination || 'Unknown')}</span><small>${escapeHtml(train.operator || '')}</small>`;
       button.addEventListener('click', () => selectTrain(train));
       list.appendChild(button);
