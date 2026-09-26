@@ -4,11 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0f172a" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQ3kQOZl3t7b+2W7f0Yl3kQYd5i8M=" crossorigin="" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous" />
     <title>UK Live Train Map</title>
   </head>
   <body>
     <div id="app"><main class="boot-screen"><h1>UK Live Train Map</h1><p>Starting map…</p></main></div>
-    <script type="module" src="/src/main.js"></script>
+    <script type="module" src="./src/main.js"></script>
+    <script nomodule>document.querySelector('#app').innerHTML = '<main class="startup-error"><h1>UK Live Train Map</h1><p>This browser cannot run the required JavaScript module.</p></main>';</script>
   </body>
 </html>
