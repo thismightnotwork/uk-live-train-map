@@ -26,8 +26,10 @@ jobs:
           node-version: 20
       - name: Install dependencies
         run: npm install
-      - name: Build
+      - name: Build Vite application
         run: npm run build
+      - name: Verify Vite output
+        run: test -s dist/index.html
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
