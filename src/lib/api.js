@@ -3,60 +3,61 @@ import demoRoutes from '../data/demo-routes.json';
 const API_URL = 'https://live-trains.lucafinnisbernard.co.uk/trains?crs=SWK';
 
 function point(value) {
-  if (!value) return null;
-  const lat = Number(value.lat ?? value.latitude);
-  const lng = Number(value.lng ?? value.lon ?? value.longitude);
+  if (!value || typeof value !== 'object') return null;
+  const source = value.position && typeof value.position === 'object' ? { ...value, ...value.position } : value;
+  const lat = Number(source.lat ?? source.latitude ?? source.location?.lat ?? source.location?.latitude);
+  const lng = Number(source.lng ?? source.lon ?? source.longitude ?? source.location?.lng ?? source.location?.longitude);
   return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+}
+
+function normaliseRoute(route) {
+  return Array.isArray(route) ? route.map(point).filter(Boolean) : [];
+}
+
+function normaliseSignals(signals) {
+  if (!Array.isArray(signals)) return [];
+  return signals.map((signal) => {
+    const position = point(signal);
+    return position ? { ...position, id: signal.id ?? signal.name ?? 'Signal', name: signal.name ?? signal.id ?? 'Signal', aspect: signal.aspect ?? null } : null;
+  }).filter(Boolean);
 }
 
 export function normalise(train) {
   const position = point(train);
   if (!position) return null;
-
-  const route = Array.isArray(train.route) ? train.route.map(point).filter(Boolean) : [];
-  const signals = Array.isArray(train.signals)
-    ? train.signals.map((signal) => {
-        const signalPoint = point(signal);
-        return signalPoint
-          ? { ...signalPoint, id: signal.id ?? signal.name ?? 'Signal', name: signal.name ?? signal.id ?? 'Signal', aspect: signal.aspect ?? null }
-          : null;
-      }).filter(Boolean)
-    : [];
-
   return {
     ...train,
     id: String(train.id ?? train.serviceId ?? train.uid ?? `${train.headcode ?? 'train'}-${position.lat}-${position.lng}`),
-    headcode: train.headcode ?? train.headCode ?? train.trainNumber ?? 'Unknown',
+    headcode: train.headcode ?? train.headCode ?? train.trainNumber ?? train.service?.headcode ?? 'Unknown',
     latitude: position.lat,
     longitude: position.lng,
-    route,
-    signals,
+    updatedAt: train.updatedAt ?? train.timestamp ?? train.lastUpdated,
+    operator: train.operator ?? train.toc ?? train.service?.operator ?? '',
+    origin: train.origin ?? train.from ?? train.service?.origin ?? '',
+    destination: train.destination ?? train.to ?? train.service?.destination ?? '',
+    route: normaliseRoute(train.route ?? train.path ?? train.service?.route),
+    signals: normaliseSignals(train.signals ?? train.signalMarkers ?? train.service?.signals),
   };
+}
+
+function rawArray(payload) {
+  if (Array.isArray(payload)) return payload;
+  for (const key of ['trains', 'data', 'services', 'results', 'items']) {
+    if (Array.isArray(payload?.[key])) return payload[key];
+  }
+  return [];
 }
 
 export async function getLiveTrains() {
   try {
-    const response = await fetch(API_URL, {
-      headers: { Accept: 'application/json' },
-      cache: 'no-store',
-    });
+    const response = await fetch(API_URL, { headers: { Accept: 'application/json' }, cache: 'no-store' });
     if (!response.ok) throw new Error(`Worker returned HTTP ${response.status}`);
     const payload = await response.json();
-    const rawTrains = Array.isArray(payload)
-      ? payload
-      : Array.isArray(payload.trains)
-        ? payload.trains
-        : Array.isArray(payload.data)
-          ? payload.data
-          : [];
-    const trains = rawTrains.map(normalise).filter(Boolean);
+    const trains = rawArray(payload).map(normalise).filter(Boolean);
     if (!trains.length) throw new Error('Worker returned no mappable train positions');
     return { trains, usingDemo: false };
   } catch (error) {
     console.warn('Live train feed unavailable; using demo data.', error);
-    return {
-      trains: demoRoutes.map(normalise).filter(Boolean),
-      usingDemo: true,
-    };
+    return { trains: demoRoutes.map(normalise).filter(Boolean), usingDemo: true };
   }
 }
