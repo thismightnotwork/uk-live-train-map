@@ -1,10 +1,10 @@
 import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
 
 const trainIcon = L.divIcon({ className: 'train-marker', html: '<span>🚆</span>', iconSize: [34, 34], iconAnchor: [17, 17] });
 const signalIcon = L.divIcon({ className: 'signal-marker', html: '<span>●</span>', iconSize: [22, 22], iconAnchor: [11, 11] });
 
 export function createMap(container) {
+  if (!container) throw new Error('Map container was not found');
   const map = L.map(container, { zoomControl: false, tap: true }).setView([50.834, -0.18], 12);
   L.control.zoom({ position: 'bottomright' }).addTo(map);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
