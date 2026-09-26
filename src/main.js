@@ -1,19 +1,20 @@
-import 'leaflet/dist/leaflet.css';
 import './style.css';
 import { getLiveTrains } from './lib/api.js';
 import { createMap, locateUser, renderTrainDetail, renderTrains } from './lib/map.js';
 
 const app = document.querySelector('#app');
 
-function showStartupError(error) {
-  console.error('Train map failed to start:', error);
-  if (app) {
-    app.innerHTML = `<main class="startup-error"><h1>UK Live Train Map</h1><p>The map could not start.</p><pre>${String(error?.message ?? error).replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]))}</pre><button type="button" onclick="location.reload()">Reload</button></main>`;
-  }
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]));
 }
 
-try {
-  if (!app) throw new Error('Application container was not found');
+function showStartupError(error) {
+  console.error('Train map failed to start:', error);
+  app.innerHTML = `<main class="startup-error"><h1>UK Live Train Map</h1><p>The map could not start.</p><pre>${escapeHtml(error?.stack ?? error?.message ?? error)}</pre><button type="button" id="reload">Reload</button></main>`;
+  document.querySelector('#reload')?.addEventListener('click', () => location.reload());
+}
+
+async function start() {
   app.innerHTML = `
     <main class="app-shell">
       <header class="topbar">
@@ -47,7 +48,7 @@ try {
       button.className = 'service-card';
       button.dataset.id = train.id;
       button.type = 'button';
-      button.innerHTML = `<strong>${train.headcode}</strong><span>${train.origin ?? 'Unknown'} → ${train.destination ?? 'Unknown'}</span><small>${train.operator ?? ''}</small>`;
+      button.innerHTML = `<strong>${escapeHtml(train.headcode)}</strong><span>${escapeHtml(train.origin ?? 'Unknown')} → ${escapeHtml(train.destination ?? 'Unknown')}</span><small>${escapeHtml(train.operator ?? '')}</small>`;
       button.addEventListener('click', () => selectTrain(train));
       list.appendChild(button);
     });
@@ -55,8 +56,9 @@ try {
 
   async function refresh() {
     const status = document.querySelector('#status');
+    const refreshButton = document.querySelector('#refresh');
     status.textContent = 'Loading trains…';
-    document.querySelector('#refresh').disabled = true;
+    refreshButton.disabled = true;
     try {
       const result = await getLiveTrains();
       trains = result.trains;
@@ -69,7 +71,7 @@ try {
       status.textContent = 'Unable to load trains';
       console.error('Train refresh failed:', error);
     } finally {
-      document.querySelector('#refresh').disabled = false;
+      refreshButton.disabled = false;
     }
   }
 
@@ -77,7 +79,7 @@ try {
   document.querySelector('#locate').addEventListener('click', () => locateUser(map));
   map.on('locationerror', () => { document.querySelector('#status').textContent = 'Location unavailable'; });
   window.addEventListener('resize', () => map.invalidateSize());
-  refresh();
-} catch (error) {
-  showStartupError(error);
+  await refresh();
 }
+
+start().catch(showStartupError);

@@ -15,15 +15,10 @@ export function createMap(container) {
 }
 
 export function renderTrains(map, trains, onSelect) {
-  const layers = [];
-  trains.forEach((train) => {
-    const marker = L.marker([train.latitude, train.longitude], { icon: trainIcon, title: train.headcode })
-      .bindTooltip(train.headcode, { direction: 'top', offset: [0, -14] })
-      .on('click', () => onSelect(train));
-    marker.addTo(map);
-    layers.push(marker);
-  });
-  return layers;
+  return trains.map((train) => L.marker([train.latitude, train.longitude], { icon: trainIcon, title: train.headcode })
+    .bindTooltip(train.headcode, { direction: 'top', offset: [0, -14] })
+    .on('click', () => onSelect(train))
+    .addTo(map));
 }
 
 export function renderTrainDetail(map, train) {
