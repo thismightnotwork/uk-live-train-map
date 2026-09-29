@@ -1,17 +1,12 @@
 {
-  "name": "uk-live-train-map",
-  "private": true,
+  "name": "uk-live-train-map-worker",
   "version": "1.0.0",
-  "type": "module",
+  "private": true,
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "leaflet": "^1.9.4"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "vite": "^7.1.7"
+    "wrangler": "^3.0.0"
   }
 }

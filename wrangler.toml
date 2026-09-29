@@ -1,0 +1,9 @@
+name = "uk-live-train-map-worker"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+
+[vars]
+REFRESH_INTERVAL_SECONDS = "30"
+MAP_CENTER_LAT = "51.5074"
+MAP_CENTER_LNG = "-0.1278"
+MAP_ZOOM = "7"
