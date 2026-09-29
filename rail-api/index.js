@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const StompJs = require('stompjs');
+const { Client } = require('@stomp/stompjs');
+const WebSocket = require('websocket');
 require('dotenv').config();
 
 const app = express();
@@ -14,10 +15,11 @@ const NR_HOST = 'publicdatafeeds.networkrail.co.uk';
 const NR_PORT = 61618;
 
 const trains = new Map();
-const signals = new Map();
 let lastUpdate = null;
 
-const stompClient = new StompJs.Client({
+global.WebSocket = WebSocket.w3cwebsocket;
+
+const stompClient = new Client({
   brokerURL: `ws://${NR_HOST}:${NR_PORT}/ws`,
   connectHeaders: {
     login: NR_USERNAME,
