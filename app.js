@@ -1,63 +1,93 @@
-(() => {
-  const API_URL = 'https://live-trains.lucafinnisbernard.co.uk/trains?crs=SWK';
-  const demo = [
-    { id: 'demo-1', headcode: '1A23', latitude: 50.8324, longitude: -0.1788, operator: 'Southern', origin: 'Portsmouth Harbour', destination: 'Brighton', route: [{ lat: 50.819, lng: -0.413 }, { lat: 50.8324, lng: -0.1788 }, { lat: 50.828, lng: -0.141 }], signals: [{ id: 'WS114', name: 'WS114', lat: 50.826, lng: -0.202, aspect: null }] },
-    { id: 'demo-2', headcode: '9T42', latitude: 50.8352, longitude: -0.151, operator: 'Thameslink', origin: 'Brighton', destination: 'Bedford', route: [{ lat: 50.828, lng: -0.141 }, { lat: 50.8352, lng: -0.151 }, { lat: 50.846, lng: -0.124 }], signals: [{ id: 'BS201', name: 'BS201', lat: 50.832, lng: -0.146, aspect: 'green' }] }
-  ];
-  const $ = (id) => document.getElementById(id);
-  const point = (value) => {
-    if (!value || typeof value !== 'object') return null;
-    const lat = Number(value.lat ?? value.latitude);
-    const lng = Number(value.lng ?? value.lon ?? value.longitude);
-    return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
-  };
-  const normalise = (train) => {
-    const position = point(train);
-    if (!position) return null;
-    return { ...train, ...position, id: String(train.id ?? train.headcode ?? `${position.lat}-${position.lng}`), headcode: train.headcode ?? 'Unknown', route: Array.isArray(train.route) ? train.route.map(point).filter(Boolean) : [], signals: Array.isArray(train.signals) ? train.signals.map((signal) => { const p = point(signal); return p ? { ...signal, ...p, name: signal.name ?? signal.id ?? 'Signal' } : null; }).filter(Boolean) : [] };
-  };
-  let map; let markers = []; let detail; let trains = [];
-  function escapeHtml(value) { return String(value ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
-  function trainIcon() { return L.divIcon({ className: 'train-marker', html: '<span>🚆</span>', iconSize: [34, 34], iconAnchor: [17, 17] }); }
-  function signalIcon() { return L.divIcon({ className: 'signal-marker', html: '<span>●</span>', iconSize: [22, 22], iconAnchor: [11, 11] }); }
-  function selectTrain(train) {
-    markers.forEach((marker) => map.removeLayer(marker));
-    if (detail) map.removeLayer(detail);
-    detail = L.layerGroup();
-    if (train.route.length > 1) L.polyline(train.route.map((p) => [p.lat, p.lng]), { color: '#2563eb', weight: 5 }).addTo(detail);
-    L.marker([train.latitude, train.longitude], { icon: trainIcon() }).bindPopup(`<b>${escapeHtml(train.headcode)}</b><br>${escapeHtml(train.origin)} → ${escapeHtml(train.destination)}`).addTo(detail);
-    train.signals.forEach((signal) => L.marker([signal.lat, signal.lng], { icon: signalIcon() }).bindTooltip(escapeHtml(signal.name)).addTo(detail));
-    detail.addTo(map);
-    map.setView([train.latitude, train.longitude], 15, { animate: true });
-  }
-  function render() {
-    markers.forEach((marker) => map.removeLayer(marker));
-    markers = trains.map((train) => L.marker([train.latitude, train.longitude], { icon: trainIcon(), title: train.headcode }).bindTooltip(train.headcode).on('click', () => selectTrain(train)).addTo(map));
-    const list = $('service-list'); list.replaceChildren();
-    trains.forEach((train) => { const button = document.createElement('button'); button.className = 'service-card'; button.type = 'button'; button.innerHTML = `<b>${escapeHtml(train.headcode)}</b><span>${escapeHtml(train.origin)} → ${escapeHtml(train.destination)}</span><small>${escapeHtml(train.operator)}</small>`; button.onclick = () => selectTrain(train); list.appendChild(button); });
-  }
-  async function refresh() {
-    $('refresh').disabled = true; $('status').textContent = 'Loading live trains…';
-    try {
-      const response = await fetch(API_URL, { headers: { Accept: 'application/json' }, cache: 'no-store' });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
-      const raw = Array.isArray(payload) ? payload : payload.trains ?? payload.data ?? [];
-      trains = raw.map(normalise).filter(Boolean);
-      if (!trains.length) throw new Error('No train positions returned');
-      $('status').textContent = `${trains.length} live services`;
-    } catch (error) {
-      trains = demo.map(normalise);
-      $('status').textContent = `Demo data — live feed unavailable (${error.message || 'network/CORS error'})`;
-    } finally { render(); $('refresh').disabled = false; }
-  }
-  function start() {
-    map = L.map('map', { zoomControl: false }).setView([50.834, -0.18], 12);
-    L.control.zoom({ position: 'bottomright' }).addTo(map);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
-    $('refresh').onclick = refresh;
-    $('locate').onclick = () => map.locate({ setView: true, maxZoom: 15, enableHighAccuracy: true });
-    refresh(); setInterval(refresh, 60000); setTimeout(() => map.invalidateSize(), 100);
-  }
-  if (window.L) start(); else $('status').textContent = 'Leaflet failed to load';
-})();
+// UK Live Train Map - Using Render Backend API
+const API_BASE = 'https://uk-live-train-map.onrender.com';
+
+let map;
+let trainsLayer;
+let signalsLayer;
+let trainMarkers = {};
+let signalMarkers = {};
+
+function initMap() {
+  map = L.map('map').setView([51.5074, -0.1278], 9);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors'
+  }).addTo(map);
+  trainsLayer = L.layerGroup().addTo(map);
+  signalsLayer = L.layerGroup().addTo(map);
+  fetchTrains();
+  fetchSignals();
+  setInterval(() => { fetchTrains(); fetchSignals(); }, 30000);
+}
+
+async function fetchTrains() {
+  try {
+    const response = await fetch(`${API_BASE}/api/trains`);
+    const data = await response.json();
+    if (data.error) { console.error('Error:', data.error); return; }
+    document.getElementById('trainCount').textContent = data.trains.length;
+    document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date(data.timestamp || Date.now()).toLocaleTimeString();
+    const newTrainMarkers = {};
+    data.trains.forEach(train => {
+      if (trainMarkers[train.id]) {
+        const marker = trainMarkers[train.id];
+        marker.setLatLng([train.lat, train.lng]);
+        marker.setIcon(getTrainIcon(train.heading || 0));
+        marker.setPopupContent(getTrainPopup(train));
+        newTrainMarkers[train.id] = marker;
+      } else {
+        const marker = L.marker([train.lat, train.lng], { icon: getTrainIcon(train.heading || 0) }).bindPopup(getTrainPopup(train));
+        marker.addTo(trainsLayer);
+        newTrainMarkers[train.id] = marker;
+      }
+    });
+    Object.keys(trainMarkers).forEach(id => { if (!newTrainMarkers[id]) trainsLayer.removeLayer(trainMarkers[id]); });
+    trainMarkers = newTrainMarkers;
+  } catch (error) { console.error('Failed to fetch trains:', error); }
+}
+
+async function fetchSignals() {
+  try {
+    const response = await fetch(`${API_BASE}/api/signals`);
+    const data = await response.json();
+    if (data.error) { console.error('Error:', data.error); return; }
+    document.getElementById('signalCount').textContent = data.signals.length;
+    const newSignalMarkers = {};
+    data.signals.forEach(signal => {
+      if (signalMarkers[signal.id]) {
+        const marker = signalMarkers[signal.id];
+        marker.setLatLng([signal.lat, signal.lng]);
+        marker.setStyle({ fillColor: getSignalColor(signal.state) });
+        marker.setPopupContent(getSignalPopup(signal));
+        newSignalMarkers[signal.id] = marker;
+      } else {
+        const marker = L.circleMarker([signal.lat, signal.lng], { radius: 12, fillColor: getSignalColor(signal.state), color: '#1f2937', weight: 3, fillOpacity: 1.0 }).bindPopup(getSignalPopup(signal));
+        marker.addTo(signalsLayer);
+        newSignalMarkers[signal.id] = marker;
+      }
+    });
+    Object.keys(signalMarkers).forEach(id => { if (!newSignalMarkers[id]) signalsLayer.removeLayer(signalMarkers[id]); });
+    signalMarkers = newSignalMarkers;
+  } catch (error) { console.error('Failed to fetch signals:', error); }
+}
+
+function getTrainIcon(heading) {
+  return L.divIcon({
+    html: `<div style="width:0;height:0;border-left:12px solid transparent;border-right:12px solid transparent;border-bottom:24px solid #2563eb;transform:rotate(${heading}deg);filter:drop-shadow(0 2px 4px rgba(0,0,0,0.4));"></div>`,
+    className: 'train-marker', iconSize: [24, 24], iconAnchor: [12, 12]
+  });
+}
+
+function getSignalColor(state) {
+  const colors = { green: '#22c55e', yellow: '#eab308', red: '#ef4444' };
+  return colors[state] || '#999';
+}
+
+function getTrainPopup(train) {
+  return `<div class="train-popup"><h3>🚂 ${train.id}</h3><p><strong>Location:</strong> ${train.location || 'Unknown'}</p><p><strong>Operator:</strong> ${train.operator || 'Unknown'}</p><p><strong>Service:</strong> ${train.service || 'Unknown'}</p><p><strong>Status:</strong> ${train.status || 'On time'}</p></div>`;
+}
+
+function getSignalPopup(signal) {
+  return `<div class="signal-popup"><h3>🚦 ${signal.name}</h3><p><strong>ID:</strong> ${signal.id}</p><p><strong>Type:</strong> ${signal.type}</p><p><strong>State:</strong> <span style="color: ${getSignalColor(signal.state)}; font-weight: bold;">${signal.state.toUpperCase()}</span></p></div>`;
+}
+
+document.addEventListener('DOMContentLoaded', initMap);
