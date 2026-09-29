@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { Client } = require('stompjs');
+const StompJs = require('stompjs');
 require('dotenv').config();
 
 const app = express();
@@ -17,7 +17,7 @@ const trains = new Map();
 const signals = new Map();
 let lastUpdate = null;
 
-const stompClient = new Client({
+const stompClient = new StompJs.Client({
   brokerURL: `ws://${NR_HOST}:${NR_PORT}/ws`,
   connectHeaders: {
     login: NR_USERNAME,
@@ -29,11 +29,9 @@ const stompClient = new Client({
 
 stompClient.onConnect = () => {
   console.log('✅ Connected to Network Rail');
-  
   stompClient.subscribe('/topic/TD_ALL_SIG_AREA', (message) => {
     handleTDMessage(message.body);
   });
-  
   stompClient.subscribe('/topic/TRAIN_MOVEMENT_ALL', (message) => {
     handleMovementMessage(message.body);
   });
@@ -49,10 +47,7 @@ function handleTDMessage(body) {
   try {
     const data = JSON.parse(body);
     if (data.trainId && data.berth) {
-      trains.set(data.trainId, {
-        ...data,
-        timestamp: Date.now()
-      });
+      trains.set(data.trainId, { ...data, timestamp: Date.now() });
       lastUpdate = Date.now();
     }
   } catch (e) {
@@ -64,10 +59,7 @@ function handleMovementMessage(body) {
   try {
     const data = JSON.parse(body);
     if (data.trainId && data.locationName) {
-      trains.set(data.trainId, {
-        ...data,
-        timestamp: Date.now()
-      });
+      trains.set(data.trainId, { ...data, timestamp: Date.now() });
       lastUpdate = Date.now();
     }
   } catch (e) {
@@ -82,15 +74,11 @@ app.get('/api/trains', (req, res) => {
     lat: train.latitude || 51.5074,
     lng: train.longitude || -0.1278,
     operator: train.operator,
-    service: train.serviceDescription || `${train.origin} → ${train.destination}`,
+    service: train.serviceDescription || (train.origin + ' → ' + train.destination),
     status: train.status || 'On time',
     timestamp: train.timestamp
   }));
-  
-  res.json({
-    trains: trainList,
-    timestamp: lastUpdate
-  });
+  res.json({ trains: trainList, timestamp: lastUpdate });
 });
 
 app.get('/api/signals', (req, res) => {
@@ -102,34 +90,18 @@ app.get('/api/signals', (req, res) => {
     { id: 'SIG005', lat: 51.4980, lng: -0.0520, state: 'red', type: 'home', name: 'Surrey Quays' },
     { id: 'SIG006', lat: 51.5070, lng: -0.1050, state: 'green', type: 'distant', name: 'London Bridge' },
   ];
-  
-  res.json({
-    signals: demoSignals,
-    timestamp: Date.now()
-  });
+  res.json({ signals: demoSignals, timestamp: Date.now() });
 });
 
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    connected: stompClient.active,
-    trainCount: trains.size,
-    lastUpdate
-  });
+  res.json({ status: 'ok', connected: stompClient.active, trainCount: trains.size, lastUpdate });
 });
 
 app.get('/', (req, res) => {
-  res.json({
-    name: 'Network Rail API',
-    endpoints: {
-      trains: '/api/trains',
-      signals: '/api/signals',
-      health: '/health'
-    }
-  });
+  res.json({ name: 'Network Rail API', endpoints: { trains: '/api/trains', signals: '/api/signals', health: '/health' } });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚂 Server running on port ${PORT}`);
-  console.log(`📡 Connected to ${NR_HOST}:${NR_PORT}`);
+  console.log('🚂 Server running on port ' + PORT);
+  console.log('📡 Connected to ' + NR_HOST + ':' + NR_PORT);
 });
