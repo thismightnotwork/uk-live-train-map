@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: network-rail-api
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 18
+      - key: NR_USERNAME
+        sync: false
+      - key: NR_PASSWORD
+        sync: false
+      - key: PORT
+        value: 3000
