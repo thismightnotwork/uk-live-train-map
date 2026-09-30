@@ -1,20 +1,16 @@
 {
-  "name": "network-rail-api",
+  "name": "rail-api",
   "version": "1.0.0",
-  "description": "Network Rail TD feed API for Render",
+  "description": "UK live train map API",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node index.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "@stomp/stompjs": "^7.0.0",
-    "express": "^4.18.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "websocket": "^1.0.34"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "kafkajs": "^2.2.4",
+    "websocket": "^1.0.35"
   }
 }

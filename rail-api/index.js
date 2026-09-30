@@ -1,187 +1,203 @@
 const express = require('express');
 const cors = require('cors');
-const { Client } = require('@stomp/stompjs');
-const WebSocket = require('websocket');
+const { Kafka, logLevel } = require('kafkajs');
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-const NR_USERNAME = process.env.NR_USERNAME;
-const NR_PASSWORD = process.env.NR_PASSWORD;
-const NR_HOST = 'publicdatafeeds.networkrail.co.uk';
-const NR_PORT = 61618;
+const PORT = Number(process.env.PORT || 3000);
+const RDM_KAFKA_BROKERS = (process.env.RDM_KAFKA_BROKERS || 'pkc-z3p1v0.europe-west2.gcp.confluent.cloud:9092')
+  .split(',').map((broker) => broker.trim()).filter(Boolean);
+const RDM_KAFKA_USERNAME = process.env.RDM_KAFKA_USERNAME;
+const RDM_KAFKA_PASSWORD = process.env.RDM_KAFKA_PASSWORD;
+const RDM_KAFKA_GROUP_ID = process.env.RDM_KAFKA_GROUP_ID || 'SC-b859ff99-c485-47a4-b812-3d7008c23d7e';
+const TD_TOPIC = 'TD_ALL_SIG_AREA';
+const MVT_TOPIC = 'TRAIN_MVT_ALL_TOC';
 
 const trains = new Map();
-let lastUpdate = null;
 const lastRawTdBodies = [];
+let lastUpdate = null;
+let lastKafkaMessageAt = null;
+let kafkaStatus = 'starting';
+let kafkaError = null;
 
 const berthMapPath = path.join(__dirname, 'berth-map.json');
 let berthMap = {};
 let berthMapStatus = 'loading';
 let berthMapError = null;
 
-const stationCoords = {
-  VIC: { lat: 51.4952, lng: -0.1441 }, LBG: { lat: 51.5065, lng: -0.0856 },
-  WAT: { lat: 51.5031, lng: -0.1132 }, LST: { lat: 51.5180, lng: -0.0817 },
-  PAD: { lat: 51.5154, lng: -0.1755 }, EUS: { lat: 51.5282, lng: -0.1337 },
-  KGX: { lat: 51.5308, lng: -0.1238 }, LIV: { lat: 51.5178, lng: -0.0823 },
-  CLJ: { lat: 51.4640, lng: -0.1700 }, SQY: { lat: 51.4980, lng: -0.0520 },
-};
-
-function lookupBerth(area, berth) { return berthMap[`${area}:${berth}`] || null; }
-
-function fetchAuthenticatedJSONFollowRedirects(url) {
-  return new Promise((resolve, reject) => {
-    const auth = 'Basic ' + Buffer.from(`${NR_USERNAME}:${NR_PASSWORD}`).toString('base64');
-    function requestWithRedirect(u, redirectCount = 0) {
-      if (redirectCount > 5) return reject(new Error('Too many redirects'));
-      https.get(u, { headers: { Authorization: auth }, timeout: 15000 }, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303 || res.statusCode === 307) {
-          const location = res.headers.location;
-          if (!location) return reject(new Error('Redirect without Location header'));
-          res.resume();
-          return requestWithRedirect(location, redirectCount + 1);
-        }
-        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-        const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-          catch (err) { reject(err); }
-        });
-      }).on('error', reject);
-    }
-    requestWithRedirect(url);
-  });
-}
-
-async function buildBerthMap() {
-  if (!NR_USERNAME || !NR_PASSWORD) throw new Error('NR_USERNAME or NR_PASSWORD not set');
-  const [smart, corpus] = await Promise.all([
-    fetchAuthenticatedJSONFollowRedirects('https://publicdatafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type=SMART'),
-    fetchAuthenticatedJSONFollowRedirects('https://publicdatafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type=CORPUS'),
-  ]);
-  const tiplocToCrs = {};
-  if (Array.isArray(corpus)) for (const row of corpus) {
-    const tiploc = row.TIPLOC || row.tiploc;
-    const crs = row.CRS || row.crs;
-    if (tiploc && crs) tiplocToCrs[tiploc] = crs;
-  }
-  const newMap = {};
-  if (Array.isArray(smart)) for (const row of smart) {
-    const area = row.AREA || row.area;
-    const berth = row.BERTH || row.berth;
-    let crs = row.CRS || row.crs;
-    const tiploc = row.TIPLOC || row.tiploc;
-    if (!area || !berth) continue;
-    if (!crs && tiploc) crs = tiplocToCrs[tiploc];
-    const coords = stationCoords[crs];
-    if (crs && coords) newMap[`${area}:${berth}`] = { crs, ...coords };
-  }
-  if (!Object.keys(newMap).length) throw new Error('No valid berth mappings produced');
-  berthMap = newMap;
-  fs.writeFileSync(berthMapPath, JSON.stringify(berthMap, null, 2));
+try {
+  const parsed = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
+  if (!parsed || typeof parsed !== 'object' || !Object.keys(parsed).length) throw new Error('Invalid or empty berth map');
+  berthMap = parsed;
   berthMapStatus = 'ready';
-  console.log('Built berth map with', Object.keys(berthMap).length, 'entries');
+  console.log(`Loaded berth-map.json with ${Object.keys(berthMap).length} entries`);
+} catch (error) {
+  berthMapStatus = 'error';
+  berthMapError = error.message;
+  console.error('Failed to load berth map:', error.message);
 }
 
-(async () => {
-  try {
-    if (fs.existsSync(berthMapPath)) {
-      const cached = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
-      if (cached && Object.keys(cached).length > 100) {
-        berthMap = cached;
-        berthMapStatus = 'ready';
-        return;
-      }
-    }
-    await buildBerthMap();
-  } catch (err) {
-    berthMapStatus = 'error';
-    berthMapError = err.message;
-    console.error('Failed to build berth map:', err.message);
+function lookupBerth(area, berth) {
+  return berthMap[`${area}:${berth}`] || null;
+}
+
+function unwrapMessage(message) {
+  if (!message || typeof message !== 'object') return null;
+  for (const key of Object.keys(message)) {
+    if (key.endsWith('_MSG')) return { msgType: key.replace('_MSG', ''), body: message[key] };
   }
-})();
-
-global.WebSocket = WebSocket.w3cwebsocket;
-const stompClient = new Client({
-  brokerURL: `ws://${NR_HOST}:${NR_PORT}/ws`,
-  connectHeaders: { login: NR_USERNAME, passcode: NR_PASSWORD },
-  debug: (str) => console.log('[STOMP]', str),
-  reconnectDelay: 5000,
-});
-
-stompClient.onConnect = () => {
-  console.log('Connected to Network Rail');
-  stompClient.subscribe('/topic/TD_ALL_SIG_AREA', (message) => handleTDMessage(message.body));
-  stompClient.subscribe('/topic/TRAIN_MVT_ALL_TOC', (message) => handleMovementMessage(message.body));
-};
-stompClient.onDisconnect = () => console.log('Disconnected');
-stompClient.activate();
-
-function unwrapMsg(msg) {
-  if (!msg || typeof msg !== 'object') return null;
-  for (const key of Object.keys(msg)) {
-    if (key.endsWith('_MSG')) return { msgType: key.replace('_MSG', ''), inner: msg[key] };
-  }
-  return null;
+  const body = message.body || message;
+  const header = message.header || message;
+  return { msgType: header.msg_type || body.msg_type, body };
 }
 
-function handleTDMessage(body) {
-  try {
-    lastRawTdBodies.push(body);
-    if (lastRawTdBodies.length > 3) lastRawTdBodies.shift();
-    const messages = JSON.parse(body);
-    if (!Array.isArray(messages)) return;
-    for (const message of messages) {
-      const wrapped = unwrapMsg(message);
-      const b = wrapped ? wrapped.inner : (message.body || message);
-      const msgType = wrapped ? wrapped.msgType : ((message.header || message).msg_type || b.msg_type);
-      if (!msgType || !b) continue;
-      const area = b.area_id;
-      if ((msgType === 'CA' || msgType === 'CC') && b.to && b.descr) {
-        const loc = lookupBerth(area, b.to);
-        if (!loc) continue;
-        trains.set(b.descr, { trainId: b.descr, crs: loc.crs, lat: loc.lat, lng: loc.lng, timestamp: Date.now(), area, berth: b.to });
-        lastUpdate = Date.now();
-      } else if (msgType === 'CB' && b.descr) {
-        trains.delete(b.descr);
-        lastUpdate = Date.now();
-      }
-    }
-  } catch (err) { console.error('[TD]', err.message); }
+function parseJsonArray(value) {
+  const parsed = JSON.parse(value);
+  return Array.isArray(parsed) ? parsed : [parsed];
 }
 
-function handleMovementMessage(body) {
-  try {
-    const messages = JSON.parse(body);
-    if (!Array.isArray(messages)) return;
-    for (const message of messages) {
-      const b = message.body || message;
-      if (!b.train_id) continue;
-      const crs = b.crs || b.location_crs;
-      const coords = stationCoords[crs];
-      if (!coords) continue;
-      trains.set(b.train_id, { ...b, trainId: b.train_id, ...coords, timestamp: Date.now() });
+function upsertTdTrain(body, msgType) {
+  if (!body?.area_id || !body?.to || !body?.descr) return;
+  const location = lookupBerth(body.area_id, body.to);
+  if (!location) return;
+  trains.set(body.descr, {
+    trainId: body.descr,
+    crs: location.crs,
+    lat: location.lat,
+    lng: location.lng,
+    area: body.area_id,
+    berth: body.to,
+    source: 'TD',
+    timestamp: Date.now(),
+  });
+  lastUpdate = Date.now();
+  console.log(`[TD] ${msgType} ${body.descr} ${body.area_id}:${body.to} -> ${location.crs}`);
+}
+
+function handleTdPayload(value) {
+  lastRawTdBodies.push(value);
+  if (lastRawTdBodies.length > 3) lastRawTdBodies.shift();
+  for (const message of parseJsonArray(value)) {
+    const event = unwrapMessage(message);
+    if (!event?.msgType || !event.body) continue;
+    if (event.msgType === 'CA' || event.msgType === 'CC') upsertTdTrain(event.body, event.msgType);
+    if (event.msgType === 'CB' && event.body.descr) {
+      trains.delete(event.body.descr);
       lastUpdate = Date.now();
     }
-  } catch (err) { console.error('[MVT]', err.message); }
+  }
 }
 
-app.get('/api/trains', (req, res) => res.json({
-  trains: Array.from(trains.values()).map((t) => ({
-    id: t.trainId, location: t.location || t.crs || 'Unknown', lat: t.lat, lng: t.lng,
-    operator: t.toc || 'Unknown', service: t.service_description || 'Unknown', status: t.status || 'On time', timestamp: t.timestamp,
-  })), timestamp: lastUpdate,
-}));
+function handleMvtPayload(value) {
+  for (const message of parseJsonArray(value)) {
+    const body = message.body || message;
+    const trainId = body.train_id || body.trainId;
+    if (!trainId) continue;
+    const lat = Number(body.latitude ?? body.lat);
+    const lng = Number(body.longitude ?? body.lng ?? body.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    trains.set(trainId, {
+      ...body,
+      trainId,
+      lat,
+      lng,
+      source: 'MVT',
+      timestamp: Date.now(),
+    });
+    lastUpdate = Date.now();
+  }
+}
+
+async function startKafka() {
+  if (!RDM_KAFKA_USERNAME || !RDM_KAFKA_PASSWORD) {
+    kafkaStatus = 'error';
+    kafkaError = 'RDM_KAFKA_USERNAME or RDM_KAFKA_PASSWORD is not set';
+    console.error(kafkaError);
+    return;
+  }
+
+  const kafka = new Kafka({
+    clientId: 'uk-live-train-map',
+    brokers: RDM_KAFKA_BROKERS,
+    ssl: true,
+    sasl: {
+      mechanism: 'plain',
+      username: RDM_KAFKA_USERNAME,
+      password: RDM_KAFKA_PASSWORD,
+    },
+    logLevel: logLevel.NOTHING,
+  });
+
+  const consumer = kafka.consumer({ groupId: RDM_KAFKA_GROUP_ID, allowAutoTopicCreation: false });
+  try {
+    await consumer.connect();
+    await consumer.subscribe({ topic: TD_TOPIC, fromBeginning: false });
+    await consumer.subscribe({ topic: MVT_TOPIC, fromBeginning: false });
+    kafkaStatus = 'connected';
+    kafkaError = null;
+    console.log(`Connected to RDM Kafka; consuming ${TD_TOPIC} and ${MVT_TOPIC}`);
+
+    await consumer.run({
+      eachMessage: async ({ topic, message }) => {
+        try {
+          const value = message.value ? message.value.toString('utf8') : '';
+          if (!value) return;
+          lastKafkaMessageAt = Date.now();
+          if (topic === TD_TOPIC) handleTdPayload(value);
+          if (topic === MVT_TOPIC) handleMvtPayload(value);
+        } catch (error) {
+          console.error(`[Kafka ${topic}]`, error.message);
+        }
+      },
+    });
+  } catch (error) {
+    kafkaStatus = 'error';
+    kafkaError = error.message;
+    console.error('Kafka connection failed:', error.message);
+  }
+}
+
+app.get('/api/trains', (req, res) => {
+  res.json({
+    trains: Array.from(trains.values()).map((train) => ({
+      id: train.trainId,
+      location: train.location || train.crs || 'Unknown',
+      lat: train.lat,
+      lng: train.lng,
+      operator: train.toc || train.operator || 'Unknown',
+      service: train.service_description || train.service || 'Unknown',
+      status: train.status || 'On time',
+      source: train.source,
+      timestamp: train.timestamp,
+    })),
+    timestamp: lastUpdate,
+  });
+});
+
 app.get('/api/signals', (req, res) => res.json({ signals: [], timestamp: Date.now() }));
 app.get('/debug/last-td', (req, res) => res.json({ lastRawTdBodies }));
-app.get('/health', (req, res) => res.json({ status: 'ok', connected: stompClient.active, trainCount: trains.size, lastUpdate, berthMapStatus, berthMapError }));
-app.get('/', (req, res) => res.json({ name: 'Network Rail API', endpoints: { trains: '/api/trains', signals: '/api/signals', health: '/health', debug: '/debug/last-td' } }));
-app.listen(PORT, () => console.log('Server running on port ' + PORT));
+app.get('/health', (req, res) => res.json({
+  status: 'ok',
+  kafkaStatus,
+  kafkaError,
+  brokers: RDM_KAFKA_BROKERS,
+  groupId: RDM_KAFKA_GROUP_ID,
+  topics: [TD_TOPIC, MVT_TOPIC],
+  lastKafkaMessageAt,
+  trainCount: trains.size,
+  lastUpdate,
+  berthMapStatus,
+  berthMapError,
+}));
+app.get('/', (req, res) => res.json({
+  name: 'RDM Network Rail API',
+  endpoints: { trains: '/api/trains', signals: '/api/signals', health: '/health', debug: '/debug/last-td' },
+}));
+
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+startKafka();
