@@ -34,6 +34,8 @@ const berthMapPath = path.join(__dirname, 'berth-map.json');
 let berthMap = {};
 let berthMapStatus = 'loading';
 let berthMapError = null;
+let berthMapDirty = false;
+let berthMapSaveTimer = null;
 
 try {
   const parsed = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
@@ -70,6 +72,40 @@ const unknownBerthLog = new Set();
 let lastBerthLogAt = 0;
 const BERTH_LOG_INTERVAL_MS = 10000;
 
+function ensureBerthInMap(area, berth) {
+  const key = `${area}:${berth}`;
+  if (berthMap[key]) return berthMap[key];
+  const entry = {
+    crs: berth,
+    lat: 51.5074,
+    lng: -0.1278,
+    area,
+    berth,
+  };
+  berthMap[key] = entry;
+  berthMapDirty = true;
+  if (!berthMapSaveTimer) {
+    berthMapSaveTimer = setTimeout(saveBerthMap, 5000);
+  }
+  return entry;
+}
+
+function saveBerthMap() {
+  if (!berthMapDirty) {
+    berthMapSaveTimer = null;
+    return;
+  }
+  try {
+    fs.writeFileSync(berthMapPath, JSON.stringify(berthMap, null, 2), 'utf8');
+    console.log(`[BerthMap] Saved ${Object.keys(berthMap).length} entries`);
+    berthMapDirty = false;
+  } catch (error) {
+    console.error('[BerthMap] Save failed:', error.message);
+  } finally {
+    berthMapSaveTimer = null;
+  }
+}
+
 function upsertTdTrain(body, msgType) {
   if (!body?.area_id || !body?.to || !body?.descr) return;
   const key = `${body.area_id}:${body.to}`;
@@ -82,16 +118,10 @@ function upsertTdTrain(body, msgType) {
         const first = unknownBerthLog.values().next().value;
         if (first) unknownBerthLog.delete(first);
       }
-      console.log(`[TD] Unknown berth ${key} for train ${body.descr}; using fallback`);
+      console.log(`[TD] Unknown berth ${key} for train ${body.descr}; adding to map`);
       lastBerthLogAt = now;
     }
-    location = {
-      crs: body.to,
-      lat: 51.5074,
-      lng: -0.1278,
-      area: body.area_id,
-      berth: body.to,
-    };
+    location = ensureBerthInMap(body.area_id, body.to);
   }
   const trainId = body.descr;
   trains.set(trainId, {
