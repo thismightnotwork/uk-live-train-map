@@ -4,6 +4,7 @@ const { Client } = require('@stomp/stompjs');
 const WebSocket = require('websocket');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 require('dotenv').config();
 
 const app = express();
@@ -20,20 +21,10 @@ const trains = new Map();
 let lastUpdate = null;
 const lastRawTdBodies = [];
 
-// Load berth→location mapping
+// Berth map state
 const berthMapPath = path.join(__dirname, 'berth-map.json');
 let berthMap = {};
-try {
-  berthMap = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
-  console.log('✅ Loaded berth-map.json with', Object.keys(berthMap).length, 'entries');
-} catch (e) {
-  console.warn('⚠️ Could not load berth-map.json:', e.message);
-}
-
-function lookupBerth(area, berth) {
-  const key = `${area}:${berth}`;
-  return berthMap[key] || null;
-}
+let berthMapReady = false;
 
 const stationCoords = {
   'VIC': { lat: 51.4952, lng: -0.1441 },
@@ -47,6 +38,85 @@ const stationCoords = {
   'CLJ': { lat: 51.4640, lng: -0.1700 },
   'SQY': { lat: 51.4980, lng: -0.0520 },
 };
+
+function lookupBerth(area, berth) {
+  const key = `${area}:${berth}`;
+  return berthMap[key] || null;
+}
+
+// Fetch SMART reference data and build berthMap
+function fetchSmartAndBuildMap() {
+  return new Promise((resolve, reject) => {
+    const url = 'https://publicdatafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type=SMART';
+    const options = {
+      headers: {
+        'Authorization': 'Basic ' + Buffer.from(NR_USERNAME + ':' + NR_PASSWORD).toString('base64'),
+      },
+    };
+    console.log('📥 Fetching SMART reference data...');
+    https.get(url, options, (res) => {
+      if (res.statusCode !== 200) {
+        return reject(new Error(`SMART fetch failed: ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        const csv = Buffer.concat(chunks).toString('utf8');
+        const lines = csv.split(/\r?\n/).filter(l => l.trim());
+        // Expect header: AREA,BERTH,TIPLOC,CRS,LAT,LNG,... (approx)
+        const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+        const idx = {
+          area: header.indexOf('area'),
+          berth: header.indexOf('berth'),
+          tiploc: header.indexOf('tiploc'),
+          crs: header.indexOf('crs'),
+          lat: header.indexOf('lat'),
+          lng: header.indexOf('lng'),
+        };
+        const newMap = {};
+        for (let i = 1; i < lines.length; i++) {
+          const cols = lines[i].split(',').map(c => c.trim());
+          if (cols.length < Math.max(idx.area, idx.berth, idx.crs, idx.lat, idx.lng) + 1) continue;
+          const area = cols[idx.area];
+          const berth = cols[idx.berth];
+          const crs = cols[idx.crs] || '';
+          const lat = parseFloat(cols[idx.lat]);
+          const lng = parseFloat(cols[idx.lng]);
+          if (!area || !berth || !crs || isNaN(lat) || isNaN(lng)) continue;
+          newMap[`${area}:${berth}`] = { crs, lat, lng };
+        }
+        berthMap = newMap;
+        fs.writeFileSync(berthMapPath, JSON.stringify(berthMap, null, 2));
+        berthMapReady = true;
+        console.log('✅ Built berth-map.json with', Object.keys(berthMap).length, 'entries');
+        resolve();
+      });
+    }).on('error', reject);
+  });
+}
+
+// Initialize berth map
+async function initBerthMap() {
+  try {
+    if (fs.existsSync(berthMapPath)) {
+      const data = fs.readFileSync(berthMapPath, 'utf8');
+      const parsed = JSON.parse(data);
+      if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 100) {
+        berthMap = parsed;
+        berthMapReady = true;
+        console.log('✅ Loaded existing berth-map.json with', Object.keys(berthMap).length, 'entries');
+        return;
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ Could not load existing berth-map.json:', e.message);
+  }
+  try {
+    await fetchSmartAndBuildMap();
+  } catch (e) {
+    console.error('❌ Failed to build berth map:', e.message);
+  }
+}
 
 global.WebSocket = WebSocket.w3cwebsocket;
 
@@ -67,7 +137,6 @@ stompClient.onDisconnect = () => console.log('❌ Disconnected');
 stompClient.activate();
 
 function unwrapMsg(msg) {
-  // Handle {"CA_MSG": {...}} envelope
   if (msg && typeof msg === 'object') {
     const keys = Object.keys(msg);
     for (const k of keys) {
@@ -95,25 +164,20 @@ function handleTDMessage(body) {
         msgType = unwrapped.msgType;
         b = unwrapped.inner;
       } else {
-        // Fallback for flat messages
         const h = msg.header || msg;
         b = msg.body || msg;
         msgType = h.msg_type || b.msg_type;
       }
 
       if (!msgType || !b) return;
-
       const area = b.area_id;
 
-      // CA/CC: berth step / interpose → update train location
       if ((msgType === 'CA' || msgType === 'CC') && b.to && b.descr) {
         const toBerth = b.to;
-        const trainId = b.descr; // headcode as train ID
+        const trainId = b.descr;
         const loc = lookupBerth(area, toBerth);
         const coords = loc || stationCoords.VIC;
-
         console.log('[TD]', msgType, 'id:', trainId, 'area:', area, 'to:', toBerth, '→', loc ? loc.crs : '(unknown)');
-
         trains.set(trainId, {
           trainId,
           crs: loc ? loc.crs : 'VIC',
@@ -126,7 +190,6 @@ function handleTDMessage(body) {
         lastUpdate = Date.now();
       }
 
-      // CB: cancel → remove train
       if (msgType === 'CB' && b.from && b.descr) {
         const trainId = b.descr;
         console.log('[TD]', 'CB cancel id:', trainId, 'area:', area, 'from:', b.from);
@@ -134,21 +197,13 @@ function handleTDMessage(body) {
         lastUpdate = Date.now();
       }
 
-      // Legacy 0003-style (if any)
       if (msgType === '0003' && b.train_id) {
         const toBerth = b.to;
         const loc = lookupBerth(area, toBerth);
         const coords = loc || stationCoords.VIC;
         const crs = b.crs || b.location_crs || (loc ? loc.crs : 'VIC');
-
         console.log('[TD]', 'id:', b.train_id, 'area:', area, 'from:', b.from, 'to:', b.to, 'descr:', b.descr);
-        trains.set(b.train_id, {
-          trainId: b.train_id,
-          crs,
-          lat: coords.lat,
-          lng: coords.lng,
-          timestamp: Date.now(),
-        });
+        trains.set(b.train_id, { trainId: b.train_id, crs, lat: coords.lat, lng: coords.lng, timestamp: Date.now() });
         lastUpdate = Date.now();
       }
     });
@@ -161,11 +216,9 @@ function handleMovementMessage(body) {
   try {
     const msgs = JSON.parse(body);
     if (!Array.isArray(msgs)) return;
-
     msgs.forEach(msg => {
       const b = msg.body || msg;
       if (!b.train_id) return;
-
       const crs = b.crs || b.location_crs;
       const coords = stationCoords[crs] || { lat: 51.5074, lng: -0.1278 };
       console.log('[MVT]', 'id:', b.train_id, 'loc:', b.location_name, 'crs:', crs);
@@ -212,18 +265,16 @@ app.get('/debug/last-td', (req, res) => {
 });
 
 app.get('/health', (req, res) =>
-  res.json({ status: 'ok', connected: stompClient.active, trainCount: trains.size, lastUpdate })
+  res.json({ status: 'ok', connected: stompClient.active, trainCount: trains.size, lastUpdate, berthMapReady })
 );
 app.get('/', (req, res) =>
   res.json({
     name: 'Network Rail API',
-    endpoints: {
-      trains: '/api/trains',
-      signals: '/api/signals',
-      health: '/health',
-      debug: '/debug/last-td',
-    },
+    endpoints: { trains: '/api/trains', signals: '/api/signals', health: '/health', debug: '/debug/last-td' },
   })
 );
 
-app.listen(PORT, () => console.log('🚂 Server running on port ' + PORT));
+// Start up
+initBerthMap().then(() => {
+  app.listen(PORT, () => console.log('🚂 Server running on port ' + PORT));
+});
