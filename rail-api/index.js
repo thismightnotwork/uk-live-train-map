@@ -70,19 +70,26 @@ function upsertTdTrain(body, msgType) {
   if (!body?.area_id || !body?.to || !body?.descr) return;
   const location = lookupBerth(body.area_id, body.to);
   if (!location) return;
-  trains.set(body.descr, {
-    trainId: body.descr,
+  const trainId = body.descr;
+  trains.set(trainId, {
+    trainId,
     crs: location.crs,
     lat: location.lat,
     lng: location.lng,
     area: body.area_id,
     berth: body.to,
+    lastBerthKey: `${body.area_id}:${body.to}`,
     source: 'TD',
     timestamp: Date.now(),
   });
   lastUpdate = Date.now();
-  console.log(`[TD] ${msgType} ${body.descr} ${body.area_id}:${body.to} -> ${location.crs}`);
+  console.log(`[TD] ${msgType} ${trainId} ${body.area_id}:${body.to} -> ${location.crs}`);
 }
+
+const recentCbKeys = new Set();
+const MAX_RECENT_CB = 200;
+let lastCbLogAt = 0;
+const CB_LOG_INTERVAL_MS = 5000;
 
 function handleTdPayload(value) {
   lastRawTdBodies.push(value);
@@ -91,11 +98,35 @@ function handleTdPayload(value) {
     const event = unwrapMessage(message);
     if (!event?.msgType || !event.body) continue;
     tdMessageCount++;
-    if (event.msgType === 'CA' || event.msgType === 'CC') upsertTdTrain(event.body, event.msgType);
-    if (event.msgType === 'CB' && event.body.descr) {
-      trains.delete(event.body.descr);
-      lastUpdate = Date.now();
-      console.log(`[TD] CB removed ${event.body.descr}`);
+    const body = event.body;
+    if (event.msgType === 'CA' || event.msgType === 'CC') {
+      upsertTdTrain(body, event.msgType);
+    } else if (event.msgType === 'CB') {
+      const area = body.area_id;
+      const berth = body.to || body.berth;
+      if (!area || !berth || berth.trim() === '' || berth === '****') {
+        continue;
+      }
+      const key = `${area}:${berth}`;
+      if (recentCbKeys.has(key)) {
+        continue;
+      }
+      recentCbKeys.add(key);
+      if (recentCbKeys.size > MAX_RECENT_CB) {
+        const first = recentCbKeys.values().next().value;
+        if (first) recentCbKeys.delete(first);
+      }
+      const now = Date.now();
+      if (now - lastCbLogAt > CB_LOG_INTERVAL_MS) {
+        console.log(`[TD] CB clear ${key}`);
+        lastCbLogAt = now;
+      }
+      for (const [trainId, rec] of trains.entries()) {
+        if (rec.source === 'TD' && rec.lastBerthKey === key) {
+          trains.delete(trainId);
+          lastUpdate = Date.now();
+        }
+      }
     }
   }
 }
@@ -111,16 +142,22 @@ function handleMvtPayload(value) {
     const lng = Number(body.longitude ?? body.lng ?? body.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     mvtMessageCount++;
+    const existing = trains.get(trainId);
     trains.set(trainId, {
       ...body,
       trainId,
       lat,
       lng,
-      source: 'MVT',
+      source: existing?.source || 'MVT',
+      lastBerthKey: existing?.lastBerthKey || null,
       timestamp: Date.now(),
     });
     lastUpdate = Date.now();
-    console.log(`[MVT] ${trainId} lat=${lat} lng=${lng}`);
+    const now = Date.now();
+    if (now - lastCbLogAt > CB_LOG_INTERVAL_MS) {
+      console.log(`[MVT] ${trainId} lat=${lat} lng=${lng}`);
+      lastCbLogAt = now;
+    }
   }
 }
 
