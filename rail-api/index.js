@@ -36,26 +36,36 @@ const stationCoords = {
 
 function lookupBerth(area, berth) { return berthMap[`${area}:${berth}`] || null; }
 
-function fetchAuthenticatedJSON(url) {
+function fetchAuthenticatedJSONFollowRedirects(url) {
   return new Promise((resolve, reject) => {
-    const options = { headers: { Authorization: 'Basic ' + Buffer.from(`${NR_USERNAME}:${NR_PASSWORD}`).toString('base64') } };
-    https.get(url, options, (res) => {
-      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => {
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-        catch (err) { reject(err); }
-      });
-    }).on('error', reject);
+    const auth = 'Basic ' + Buffer.from(`${NR_USERNAME}:${NR_PASSWORD}`).toString('base64');
+    function requestWithRedirect(u, redirectCount = 0) {
+      if (redirectCount > 5) return reject(new Error('Too many redirects'));
+      https.get(u, { headers: { Authorization: auth }, timeout: 15000 }, (res) => {
+        if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303 || res.statusCode === 307) {
+          const location = res.headers.location;
+          if (!location) return reject(new Error('Redirect without Location header'));
+          res.resume();
+          return requestWithRedirect(location, redirectCount + 1);
+        }
+        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+          catch (err) { reject(err); }
+        });
+      }).on('error', reject);
+    }
+    requestWithRedirect(url);
   });
 }
 
 async function buildBerthMap() {
   if (!NR_USERNAME || !NR_PASSWORD) throw new Error('NR_USERNAME or NR_PASSWORD not set');
   const [smart, corpus] = await Promise.all([
-    fetchAuthenticatedJSON('https://publicdatafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type=SMART'),
-    fetchAuthenticatedJSON('https://publicdatafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type=CORPUS'),
+    fetchAuthenticatedJSONFollowRedirects('https://publicdatafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type=SMART'),
+    fetchAuthenticatedJSONFollowRedirects('https://publicdatafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type=CORPUS'),
   ]);
   const tiplocToCrs = {};
   if (Array.isArray(corpus)) for (const row of corpus) {
