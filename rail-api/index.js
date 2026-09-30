@@ -66,60 +66,92 @@ stompClient.onConnect = () => {
 stompClient.onDisconnect = () => console.log('❌ Disconnected');
 stompClient.activate();
 
+function unwrapMsg(msg) {
+  // Handle {"CA_MSG": {...}} envelope
+  if (msg && typeof msg === 'object') {
+    const keys = Object.keys(msg);
+    for (const k of keys) {
+      if (k.endsWith('_MSG')) {
+        return { msgType: k.replace('_MSG', ''), inner: msg[k] };
+      }
+    }
+  }
+  return null;
+}
+
 function handleTDMessage(body) {
   try {
     lastRawTdBodies.push(body);
     if (lastRawTdBodies.length > 3) lastRawTdBodies.shift();
 
     const msgs = JSON.parse(body);
-    if (Array.isArray(msgs)) {
-      msgs.forEach(msg => {
+    if (!Array.isArray(msgs)) return;
+
+    msgs.forEach(msg => {
+      const unwrapped = unwrapMsg(msg);
+      let msgType, b;
+
+      if (unwrapped) {
+        msgType = unwrapped.msgType;
+        b = unwrapped.inner;
+      } else {
+        // Fallback for flat messages
         const h = msg.header || msg;
-        const b = msg.body || msg;
-        const msgType = h.msg_type || b.msg_type;
+        b = msg.body || msg;
+        msgType = h.msg_type || b.msg_type;
+      }
 
-        // CA/CC messages carry berth steps with location info
-        if ((msgType === 'CA' || msgType === 'CC') && b.descr) {
-          const area = b.area_id;
-          const toBerth = b.to;
-          const trainId = b.descr; // headcode used as train ID
-          const loc = lookupBerth(area, toBerth);
-          const coords = loc || stationCoords.VIC;
+      if (!msgType || !b) return;
 
-          console.log('[TD]', msgType, 'id:', trainId, 'area:', area, 'to:', toBerth, '→', loc ? loc.crs : '(unknown)');
+      const area = b.area_id;
 
-          trains.set(trainId, {
-            trainId: trainId,
-            crs: loc ? loc.crs : 'VIC',
-            lat: coords.lat,
-            lng: coords.lng,
-            timestamp: Date.now(),
-            area,
-            berth: toBerth,
-          });
-          lastUpdate = Date.now();
-        }
+      // CA/CC: berth step / interpose → update train location
+      if ((msgType === 'CA' || msgType === 'CC') && b.to && b.descr) {
+        const toBerth = b.to;
+        const trainId = b.descr; // headcode as train ID
+        const loc = lookupBerth(area, toBerth);
+        const coords = loc || stationCoords.VIC;
 
-        // Legacy 0003-style messages (if any)
-        if (msgType === '0003' && b.train_id) {
-          const area = b.area_id;
-          const toBerth = b.to;
-          const loc = lookupBerth(area, toBerth);
-          const coords = loc || stationCoords.VIC;
-          const crs = b.crs || b.location_crs || (loc ? loc.crs : 'VIC');
+        console.log('[TD]', msgType, 'id:', trainId, 'area:', area, 'to:', toBerth, '→', loc ? loc.crs : '(unknown)');
 
-          console.log('[TD]', 'id:', b.train_id, 'area:', area, 'from:', b.from, 'to:', b.to, 'descr:', b.descr);
-          trains.set(b.train_id, {
-            trainId: b.train_id,
-            crs,
-            lat: coords.lat,
-            lng: coords.lng,
-            timestamp: Date.now(),
-          });
-          lastUpdate = Date.now();
-        }
-      });
-    }
+        trains.set(trainId, {
+          trainId,
+          crs: loc ? loc.crs : 'VIC',
+          lat: coords.lat,
+          lng: coords.lng,
+          timestamp: Date.now(),
+          area,
+          berth: toBerth,
+        });
+        lastUpdate = Date.now();
+      }
+
+      // CB: cancel → remove train
+      if (msgType === 'CB' && b.from && b.descr) {
+        const trainId = b.descr;
+        console.log('[TD]', 'CB cancel id:', trainId, 'area:', area, 'from:', b.from);
+        trains.delete(trainId);
+        lastUpdate = Date.now();
+      }
+
+      // Legacy 0003-style (if any)
+      if (msgType === '0003' && b.train_id) {
+        const toBerth = b.to;
+        const loc = lookupBerth(area, toBerth);
+        const coords = loc || stationCoords.VIC;
+        const crs = b.crs || b.location_crs || (loc ? loc.crs : 'VIC');
+
+        console.log('[TD]', 'id:', b.train_id, 'area:', area, 'from:', b.from, 'to:', b.to, 'descr:', b.descr);
+        trains.set(b.train_id, {
+          trainId: b.train_id,
+          crs,
+          lat: coords.lat,
+          lng: coords.lng,
+          timestamp: Date.now(),
+        });
+        lastUpdate = Date.now();
+      }
+    });
   } catch (e) {
     console.error('[TD]', e.message);
   }
@@ -128,52 +160,70 @@ function handleTDMessage(body) {
 function handleMovementMessage(body) {
   try {
     const msgs = JSON.parse(body);
-    if (Array.isArray(msgs)) {
-      msgs.forEach(msg => {
-        const b = msg.body || msg;
-        if (b.train_id) {
-          const crs = b.crs || b.location_crs;
-          const coords = stationCoords[crs] || { lat: 51.5074, lng: -0.1278 };
-          console.log('[MVT]', 'id:', b.train_id, 'loc:', b.location_name, 'crs:', crs);
-          trains.set(b.train_id, { ...b, trainId: b.train_id, lat: coords.lat, lng: coords.lng, timestamp: Date.now() });
-          lastUpdate = Date.now();
-        }
-      });
-    }
+    if (!Array.isArray(msgs)) return;
+
+    msgs.forEach(msg => {
+      const b = msg.body || msg;
+      if (!b.train_id) return;
+
+      const crs = b.crs || b.location_crs;
+      const coords = stationCoords[crs] || { lat: 51.5074, lng: -0.1278 };
+      console.log('[MVT]', 'id:', b.train_id, 'loc:', b.location_name, 'crs:', crs);
+      trains.set(b.train_id, { ...b, trainId: b.train_id, lat: coords.lat, lng: coords.lng, timestamp: Date.now() });
+      lastUpdate = Date.now();
+    });
   } catch (e) {
     console.error('[MVT]', e.message);
   }
 }
 
 app.get('/api/trains', (req, res) => {
-  res.json({ trains: Array.from(trains.values()).map(t => ({
-    id: t.trainId,
-    location: t.location || t.crs || 'Unknown',
-    lat: t.lat,
-    lng: t.lng,
-    operator: t.toc || 'Unknown',
-    service: t.service_description || 'Unknown',
-    status: t.status || 'On time',
-    timestamp: t.timestamp
-  })), timestamp: lastUpdate });
+  res.json({
+    trains: Array.from(trains.values()).map(t => ({
+      id: t.trainId,
+      location: t.location || t.crs || 'Unknown',
+      lat: t.lat,
+      lng: t.lng,
+      operator: t.toc || 'Unknown',
+      service: t.service_description || 'Unknown',
+      status: t.status || 'On time',
+      timestamp: t.timestamp,
+    })),
+    timestamp: lastUpdate,
+  });
 });
 
 app.get('/api/signals', (req, res) => {
-  res.json({ signals: [
-    { id: 'SIG001', lat: 51.4975, lng: -0.144, state: 'green', type: 'home', name: 'Victoria West' },
-    { id: 'SIG002', lat: 51.475, lng: -0.175, state: 'green', type: 'block', name: 'Clapham Jct' },
-    { id: 'SIG003', lat: 51.503, lng: -0.113, state: 'yellow', type: 'home', name: 'Waterloo East' },
-    { id: 'SIG004', lat: 51.518, lng: -0.14, state: 'green', type: 'block', name: 'Euston North' },
-    { id: 'SIG005', lat: 51.498, lng: -0.052, state: 'red', type: 'home', name: 'Surrey Quays' },
-    { id: 'SIG006', lat: 51.507, lng: -0.105, state: 'green', type: 'distant', name: 'London Bridge' },
-  ], timestamp: Date.now() });
+  res.json({
+    signals: [
+      { id: 'SIG001', lat: 51.4975, lng: -0.144, state: 'green', type: 'home', name: 'Victoria West' },
+      { id: 'SIG002', lat: 51.475, lng: -0.175, state: 'green', type: 'block', name: 'Clapham Jct' },
+      { id: 'SIG003', lat: 51.503, lng: -0.113, state: 'yellow', type: 'home', name: 'Waterloo East' },
+      { id: 'SIG004', lat: 51.518, lng: -0.14, state: 'green', type: 'block', name: 'Euston North' },
+      { id: 'SIG005', lat: 51.498, lng: -0.052, state: 'red', type: 'home', name: 'Surrey Quays' },
+      { id: 'SIG006', lat: 51.507, lng: -0.105, state: 'green', type: 'distant', name: 'London Bridge' },
+    ],
+    timestamp: Date.now(),
+  });
 });
 
 app.get('/debug/last-td', (req, res) => {
   res.json({ lastRawTdBodies });
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', connected: stompClient.active, trainCount: trains.size, lastUpdate }));
-app.get('/', (req, res) => res.json({ name: 'Network Rail API', endpoints: { trains: '/api/trains', signals: '/api/signals', health: '/health', debug: '/debug/last-td' } }));
+app.get('/health', (req, res) =>
+  res.json({ status: 'ok', connected: stompClient.active, trainCount: trains.size, lastUpdate })
+);
+app.get('/', (req, res) =>
+  res.json({
+    name: 'Network Rail API',
+    endpoints: {
+      trains: '/api/trains',
+      signals: '/api/signals',
+      health: '/health',
+      debug: '/debug/last-td',
+    },
+  })
+);
 
 app.listen(PORT, () => console.log('🚂 Server running on port ' + PORT));
