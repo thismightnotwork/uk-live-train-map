@@ -20,10 +20,15 @@ const MVT_TOPIC = 'TRAIN_MVT_ALL_TOC';
 
 const trains = new Map();
 const lastRawTdBodies = [];
+const lastRawMvtBodies = [];
 let lastUpdate = null;
 let lastKafkaMessageAt = null;
 let kafkaStatus = 'starting';
 let kafkaError = null;
+let tdMessageCount = 0;
+let mvtMessageCount = 0;
+let tdErrorCount = 0;
+let mvtErrorCount = 0;
 
 const berthMapPath = path.join(__dirname, 'berth-map.json');
 let berthMap = {};
@@ -85,15 +90,19 @@ function handleTdPayload(value) {
   for (const message of parseJsonArray(value)) {
     const event = unwrapMessage(message);
     if (!event?.msgType || !event.body) continue;
+    tdMessageCount++;
     if (event.msgType === 'CA' || event.msgType === 'CC') upsertTdTrain(event.body, event.msgType);
     if (event.msgType === 'CB' && event.body.descr) {
       trains.delete(event.body.descr);
       lastUpdate = Date.now();
+      console.log(`[TD] CB removed ${event.body.descr}`);
     }
   }
 }
 
 function handleMvtPayload(value) {
+  lastRawMvtBodies.push(value);
+  if (lastRawMvtBodies.length > 3) lastRawMvtBodies.shift();
   for (const message of parseJsonArray(value)) {
     const body = message.body || message;
     const trainId = body.train_id || body.trainId;
@@ -101,6 +110,7 @@ function handleMvtPayload(value) {
     const lat = Number(body.latitude ?? body.lat);
     const lng = Number(body.longitude ?? body.lng ?? body.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    mvtMessageCount++;
     trains.set(trainId, {
       ...body,
       trainId,
@@ -110,6 +120,7 @@ function handleMvtPayload(value) {
       timestamp: Date.now(),
     });
     lastUpdate = Date.now();
+    console.log(`[MVT] ${trainId} lat=${lat} lng=${lng}`);
   }
 }
 
@@ -148,10 +159,15 @@ async function startKafka() {
           const value = message.value ? message.value.toString('utf8') : '';
           if (!value) return;
           lastKafkaMessageAt = Date.now();
-          if (topic === TD_TOPIC) handleTdPayload(value);
-          if (topic === MVT_TOPIC) handleMvtPayload(value);
+          if (topic === TD_TOPIC) {
+            handleTdPayload(value);
+          } else if (topic === MVT_TOPIC) {
+            handleMvtPayload(value);
+          }
         } catch (error) {
           console.error(`[Kafka ${topic}]`, error.message);
+          if (topic === TD_TOPIC) tdErrorCount++;
+          if (topic === MVT_TOPIC) mvtErrorCount++;
         }
       },
     });
@@ -181,6 +197,16 @@ app.get('/api/trains', (req, res) => {
 
 app.get('/api/signals', (req, res) => res.json({ signals: [], timestamp: Date.now() }));
 app.get('/debug/last-td', (req, res) => res.json({ lastRawTdBodies }));
+app.get('/debug/last-mvt', (req, res) => res.json({ lastRawMvtBodies }));
+app.get('/debug/stats', (req, res) => res.json({
+  trainCount: trains.size,
+  tdMessageCount,
+  mvtMessageCount,
+  tdErrorCount,
+  mvtErrorCount,
+  lastKafkaMessageAt,
+  lastUpdate,
+}));
 app.get('/health', (req, res) => res.json({
   status: 'ok',
   kafkaStatus,
@@ -196,7 +222,7 @@ app.get('/health', (req, res) => res.json({
 }));
 app.get('/', (req, res) => res.json({
   name: 'RDM Network Rail API',
-  endpoints: { trains: '/api/trains', signals: '/api/signals', health: '/health', debug: '/debug/last-td' },
+  endpoints: { trains: '/api/trains', signals: '/api/signals', health: '/health', debug: { lastTd: '/debug/last-td', lastMvt: '/debug/last-mvt', stats: '/debug/stats' } },
 }));
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
