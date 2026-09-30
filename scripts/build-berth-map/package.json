@@ -1,0 +1,13 @@
+{
+  "name": "build-berth-map",
+  "version": "1.0.0",
+  "description": "Build rail-api/berth-map.json from Network Rail SMART + CORPUS reference data",
+  "type": "module",
+  "main": "build-berth-map.js",
+  "scripts": {
+    "build": "node build-berth-map.js"
+  },
+  "dependencies": {
+    "csv-parse": "^5.5.0"
+  }
+}
