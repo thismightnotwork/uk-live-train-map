@@ -3,6 +3,7 @@ const cors = require('cors');
 const { Kafka, logLevel } = require('kafkajs');
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 require('dotenv').config();
 
 const app = express();
@@ -31,22 +32,109 @@ let tdErrorCount = 0;
 let mvtErrorCount = 0;
 
 const berthMapPath = path.join(__dirname, 'berth-map.json');
+const stationsPath = path.join(__dirname, 'stations.json');
 let berthMap = {};
 let berthMapStatus = 'loading';
 let berthMapError = null;
 let berthMapDirty = false;
 let berthMapSaveTimer = null;
+let stationsByCrs = {};
+let lastBerthMapCheckAt = 0;
+const BERTH_MAP_CHECK_INTERVAL_MS = 60000;
 
-try {
-  const parsed = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
-  if (!parsed || typeof parsed !== 'object') throw new Error('Invalid berth map');
-  berthMap = parsed;
-  berthMapStatus = 'ready';
-  console.log(`Loaded berth-map.json with ${Object.keys(berthMap).length} entries`);
-} catch (error) {
-  berthMapStatus = 'error';
-  berthMapError = error.message;
-  console.error('Failed to load berth map:', error.message);
+function loadStations() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stationsPath, 'utf8'));
+    if (!Array.isArray(parsed)) throw new Error('Invalid stations file');
+    stationsByCrs = {};
+    for (const s of parsed) {
+      if (s?.crs) stationsByCrs[s.crs.toUpperCase()] = s;
+    }
+    console.log(`Loaded stations.json with ${Object.keys(stationsByCrs).length} stations`);
+  } catch (error) {
+    console.error('Failed to load stations.json; CRS fallback will be limited:', error.message);
+  }
+}
+
+function isBerthMapGood() {
+  if (!fs.existsSync(berthMapPath)) return false;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return false;
+    const count = Object.keys(parsed).length;
+    const minEntries = Number(process.env.MIN_BERTH_MAP_ENTRIES || 1000);
+    if (count < minEntries) {
+      console.log(`Berth map has ${count} entries, below threshold ${minEntries}`);
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function runBerthMapBuilder() {
+  const scriptDir = path.join(__dirname, '../scripts/build-berth-map');
+  const scriptPath = path.join(scriptDir, 'build-berth-map.js');
+  if (!fs.existsSync(scriptPath)) {
+    console.log('[BerthMap] Builder script not found; skipping auto-build');
+    return;
+  }
+  try {
+    console.log('[BerthMap] Running offline builder...');
+    const out = execSync(`node ${scriptPath}`, {
+      cwd: scriptDir,
+      env: { ...process.env },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    console.log('[BerthMap] Builder output:', out);
+    return true;
+  } catch (error) {
+    console.error('[BerthMap] Builder failed:', error.message);
+    if (error.stdout) console.error('[BerthMap] stdout:', error.stdout.toString());
+    if (error.stderr) console.error('[BerthMap] stderr:', error.stderr.toString());
+    return false;
+  }
+}
+
+function ensureBerthMap() {
+  const now = Date.now();
+  if (now - lastBerthMapCheckAt < BERTH_MAP_CHECK_INTERVAL_MS) return;
+  lastBerthMapCheckAt = now;
+  if (!isBerthMapGood()) {
+    console.log('[BerthMap] Map missing or insufficient; attempting rebuild');
+    const ok = runBerthMapBuilder();
+    if (ok) {
+      console.log('[BerthMap] Rebuild succeeded; reloading');
+      try {
+        const parsed = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
+        berthMap = parsed;
+        berthMapStatus = 'ready';
+        berthMapError = null;
+        console.log(`Loaded berth-map.json with ${Object.keys(berthMap).length} entries`);
+      } catch (error) {
+        berthMapStatus = 'error';
+        berthMapError = error.message;
+        console.error('Failed to reload berth map after rebuild:', error.message);
+      }
+    }
+  }
+}
+
+function loadBerthMap() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') throw new Error('Invalid berth map');
+    berthMap = parsed;
+    berthMapStatus = 'ready';
+    console.log(`Loaded berth-map.json with ${Object.keys(berthMap).length} entries`);
+  } catch (error) {
+    berthMapStatus = 'error';
+    berthMapError = error.message;
+    console.error('Failed to load berth map:', error.message);
+    ensureBerthMap();
+  }
 }
 
 function lookupBerth(area, berth) {
@@ -75,12 +163,15 @@ const BERTH_LOG_INTERVAL_MS = 10000;
 function ensureBerthInMap(area, berth) {
   const key = `${area}:${berth}`;
   if (berthMap[key]) return berthMap[key];
+  const crs = berth.toUpperCase();
+  const station = stationsByCrs[crs];
   const entry = {
-    crs: berth,
-    lat: 51.5074,
-    lng: -0.1278,
+    crs,
+    lat: station?.lat ?? 51.5074,
+    lng: station?.lng ?? -0.1278,
     area,
     berth,
+    fromStationsFallback: !!station,
   };
   berthMap[key] = entry;
   berthMapDirty = true;
@@ -269,6 +360,7 @@ async function startKafka() {
 }
 
 app.get('/api/trains', (req, res) => {
+  ensureBerthMap();
   res.json({
     trains: Array.from(trains.values()).map((train) => ({
       id: train.trainId,
@@ -297,6 +389,7 @@ app.get('/debug/stats', (req, res) => res.json({
   lastKafkaMessageAt,
   lastUpdate,
   berthMapSize: Object.keys(berthMap).length,
+  stationsLoaded: Object.keys(stationsByCrs).length,
 }));
 app.get('/health', (req, res) => res.json({
   status: 'ok',
@@ -311,11 +404,16 @@ app.get('/health', (req, res) => res.json({
   berthMapStatus,
   berthMapError,
   berthMapSize: Object.keys(berthMap).length,
+  stationsLoaded: Object.keys(stationsByCrs).length,
 }));
 app.get('/', (req, res) => res.json({
   name: 'RDM Network Rail API',
   endpoints: { trains: '/api/trains', signals: '/api/signals', health: '/health', debug: { lastTd: '/debug/last-td', lastMvt: '/debug/last-mvt', stats: '/debug/stats' } },
 }));
+
+loadStations();
+loadBerthMap();
+setInterval(ensureBerthMap, BERTH_MAP_CHECK_INTERVAL_MS);
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 startKafka();
