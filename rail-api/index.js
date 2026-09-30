@@ -37,7 +37,7 @@ let berthMapError = null;
 
 try {
   const parsed = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
-  if (!parsed || typeof parsed !== 'object' || !Object.keys(parsed).length) throw new Error('Invalid or empty berth map');
+  if (!parsed || typeof parsed !== 'object') throw new Error('Invalid berth map');
   berthMap = parsed;
   berthMapStatus = 'ready';
   console.log(`Loaded berth-map.json with ${Object.keys(berthMap).length} entries`);
@@ -66,10 +66,33 @@ function parseJsonArray(value) {
   return Array.isArray(parsed) ? parsed : [parsed];
 }
 
+const unknownBerthLog = new Set();
+let lastBerthLogAt = 0;
+const BERTH_LOG_INTERVAL_MS = 10000;
+
 function upsertTdTrain(body, msgType) {
   if (!body?.area_id || !body?.to || !body?.descr) return;
-  const location = lookupBerth(body.area_id, body.to);
-  if (!location) return;
+  const key = `${body.area_id}:${body.to}`;
+  let location = lookupBerth(body.area_id, body.to);
+  if (!location) {
+    const now = Date.now();
+    if (!unknownBerthLog.has(key) && now - lastBerthLogAt > BERTH_LOG_INTERVAL_MS) {
+      unknownBerthLog.add(key);
+      if (unknownBerthLog.size > 500) {
+        const first = unknownBerthLog.values().next().value;
+        if (first) unknownBerthLog.delete(first);
+      }
+      console.log(`[TD] Unknown berth ${key} for train ${body.descr}; using fallback`);
+      lastBerthLogAt = now;
+    }
+    location = {
+      crs: body.to,
+      lat: 51.5074,
+      lng: -0.1278,
+      area: body.area_id,
+      berth: body.to,
+    };
+  }
   const trainId = body.descr;
   trains.set(trainId, {
     trainId,
@@ -78,12 +101,12 @@ function upsertTdTrain(body, msgType) {
     lng: location.lng,
     area: body.area_id,
     berth: body.to,
-    lastBerthKey: `${body.area_id}:${body.to}`,
+    lastBerthKey: key,
     source: 'TD',
     timestamp: Date.now(),
   });
   lastUpdate = Date.now();
-  console.log(`[TD] ${msgType} ${trainId} ${body.area_id}:${body.to} -> ${location.crs}`);
+  console.log(`[TD] ${msgType} ${trainId} ${key} -> ${location.crs}`);
 }
 
 const recentCbKeys = new Set();
@@ -243,6 +266,7 @@ app.get('/debug/stats', (req, res) => res.json({
   mvtErrorCount,
   lastKafkaMessageAt,
   lastUpdate,
+  berthMapSize: Object.keys(berthMap).length,
 }));
 app.get('/health', (req, res) => res.json({
   status: 'ok',
@@ -256,6 +280,7 @@ app.get('/health', (req, res) => res.json({
   lastUpdate,
   berthMapStatus,
   berthMapError,
+  berthMapSize: Object.keys(berthMap).length,
 }));
 app.get('/', (req, res) => res.json({
   name: 'RDM Network Rail API',
