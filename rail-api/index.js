@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const { Client } = require('@stomp/stompjs');
 const WebSocket = require('websocket');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -16,7 +18,22 @@ const NR_PORT = 61618;
 
 const trains = new Map();
 let lastUpdate = null;
-const lastRawTdBodies = []; // store last 3 raw TD bodies for debugging
+const lastRawTdBodies = [];
+
+// Load berth→location mapping
+const berthMapPath = path.join(__dirname, 'berth-map.json');
+let berthMap = {};
+try {
+  berthMap = JSON.parse(fs.readFileSync(berthMapPath, 'utf8'));
+  console.log('✅ Loaded berth-map.json with', Object.keys(berthMap).length, 'entries');
+} catch (e) {
+  console.warn('⚠️ Could not load berth-map.json:', e.message);
+}
+
+function lookupBerth(area, berth) {
+  const key = `${area}:${berth}`;
+  return berthMap[key] || null;
+}
 
 const stationCoords = {
   'VIC': { lat: 51.4952, lng: -0.1441 },
@@ -51,24 +68,61 @@ stompClient.activate();
 
 function handleTDMessage(body) {
   try {
-    // Store raw body for debug endpoint
     lastRawTdBodies.push(body);
     if (lastRawTdBodies.length > 3) lastRawTdBodies.shift();
 
     const msgs = JSON.parse(body);
     if (Array.isArray(msgs)) {
       msgs.forEach(msg => {
-        if (msg.header?.msg_type === '0003' && msg.body?.train_id) {
-          const b = msg.body;
-          console.log('[TD]', 'id:', b.train_id, 'area:', b.area_id, 'from:', b.from, 'to:', b.to, 'descr:', b.descr);
-          const crs = b.crs || b.location_crs;
-          const coords = stationCoords[crs] || { lat: 51.5074, lng: -0.1278 };
-          trains.set(b.train_id, { trainId: b.train_id, crs, lat: coords.lat, lng: coords.lng, timestamp: Date.now() });
+        const h = msg.header || msg;
+        const b = msg.body || msg;
+        const msgType = h.msg_type || b.msg_type;
+
+        // CA/CC messages carry berth steps with location info
+        if ((msgType === 'CA' || msgType === 'CC') && b.descr) {
+          const area = b.area_id;
+          const toBerth = b.to;
+          const trainId = b.descr; // headcode used as train ID
+          const loc = lookupBerth(area, toBerth);
+          const coords = loc || stationCoords.VIC;
+
+          console.log('[TD]', msgType, 'id:', trainId, 'area:', area, 'to:', toBerth, '→', loc ? loc.crs : '(unknown)');
+
+          trains.set(trainId, {
+            trainId: trainId,
+            crs: loc ? loc.crs : 'VIC',
+            lat: coords.lat,
+            lng: coords.lng,
+            timestamp: Date.now(),
+            area,
+            berth: toBerth,
+          });
+          lastUpdate = Date.now();
+        }
+
+        // Legacy 0003-style messages (if any)
+        if (msgType === '0003' && b.train_id) {
+          const area = b.area_id;
+          const toBerth = b.to;
+          const loc = lookupBerth(area, toBerth);
+          const coords = loc || stationCoords.VIC;
+          const crs = b.crs || b.location_crs || (loc ? loc.crs : 'VIC');
+
+          console.log('[TD]', 'id:', b.train_id, 'area:', area, 'from:', b.from, 'to:', b.to, 'descr:', b.descr);
+          trains.set(b.train_id, {
+            trainId: b.train_id,
+            crs,
+            lat: coords.lat,
+            lng: coords.lng,
+            timestamp: Date.now(),
+          });
           lastUpdate = Date.now();
         }
       });
     }
-  } catch (e) { console.error('[TD]', e.message); }
+  } catch (e) {
+    console.error('[TD]', e.message);
+  }
 }
 
 function handleMovementMessage(body) {
@@ -76,24 +130,31 @@ function handleMovementMessage(body) {
     const msgs = JSON.parse(body);
     if (Array.isArray(msgs)) {
       msgs.forEach(msg => {
-        if (msg.body?.train_id) {
-          const b = msg.body;
-          console.log('[MVT]', 'id:', b.train_id, 'loc:', b.location_name, 'crs:', b.crs);
+        const b = msg.body || msg;
+        if (b.train_id) {
           const crs = b.crs || b.location_crs;
           const coords = stationCoords[crs] || { lat: 51.5074, lng: -0.1278 };
+          console.log('[MVT]', 'id:', b.train_id, 'loc:', b.location_name, 'crs:', crs);
           trains.set(b.train_id, { ...b, trainId: b.train_id, lat: coords.lat, lng: coords.lng, timestamp: Date.now() });
           lastUpdate = Date.now();
         }
       });
     }
-  } catch (e) { console.error('[MVT]', e.message); }
+  } catch (e) {
+    console.error('[MVT]', e.message);
+  }
 }
 
 app.get('/api/trains', (req, res) => {
   res.json({ trains: Array.from(trains.values()).map(t => ({
-    id: t.trainId, location: t.location || t.crs || 'Unknown',
-    lat: t.lat, lng: t.lng, operator: t.toc || 'Unknown',
-    service: t.service_description || 'Unknown', status: t.status || 'On time', timestamp: t.timestamp
+    id: t.trainId,
+    location: t.location || t.crs || 'Unknown',
+    lat: t.lat,
+    lng: t.lng,
+    operator: t.toc || 'Unknown',
+    service: t.service_description || 'Unknown',
+    status: t.status || 'On time',
+    timestamp: t.timestamp
   })), timestamp: lastUpdate });
 });
 
